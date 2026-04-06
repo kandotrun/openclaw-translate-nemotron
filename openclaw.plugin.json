@@ -14,13 +14,13 @@
       },
       "ollamaBaseUrl": {
         "type": "string",
-        "default": "https://ollama.com/v1",
-        "description": "Ollama Cloud base URL"
+        "default": "http://127.0.0.1:11434/v1",
+        "description": "Ollama base URL (local or cloud)"
       },
       "apiKey": {
         "type": "string",
-        "default": "ollama-local",
-        "description": "API key for Ollama Cloud"
+        "default": "ollama",
+        "description": "API key for Ollama (local uses 'ollama', cloud uses your key)"
       },
       "sourceLang": {
         "type": "string",
@@ -34,8 +34,8 @@
       },
       "model": {
         "type": "string",
-        "default": "nemotron-3-super:120b-cloud",
-        "description": "Ollama Cloud model for translation"
+        "default": "nemotron-3-super:120b",
+        "description": "Ollama model for translation (nemotron-3-super:120b or nemotron-3-nano:30b)"
       },
       "maxTokens": {
         "type": "number",

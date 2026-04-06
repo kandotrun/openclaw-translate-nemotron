@@ -3,18 +3,14 @@
  *
  * Translates Japanese messages to English before LLM processing,
  * then translates English responses back to Japanese.
- * Uses Nemotron via Ollama Cloud for translation.
+ * Uses Nemotron via local Ollama for translation.
  *
  * Flow:
- *   Japanese input → [J→E translation via Nemotron] → English prompt to LLM
- *   English output from LLM → [E→J translation via Nemotron] → Japanese to user
- *
- * Based on whisper-dict-auto plugin architecture.
+ *   Japanese input → [J→E translation] → LLM (English)
+ *   English output → [E→J translation] → Japanese to user
  */
 
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
-import { homedir } from "node:os";
+import { EventEmitter } from "node:events";
 
 // ============================================================================
 // Config
@@ -33,20 +29,20 @@ interface PluginConfig {
 
 const DEFAULTS: Required<PluginConfig> = {
   enabled: true,
-  ollamaBaseUrl: "https://ollama.com/v1",
-  apiKey: "ollama-local",
+  ollamaBaseUrl: "http://127.0.0.1:11434/v1",
+  apiKey: "ollama",
   sourceLang: "Japanese",
   targetLang: "English",
-  model: "nemotron-3-super:120b-cloud",
+  model: "nemotron-3-super:120b",
   maxTokens: 1024,
   injectSystemPrompt: true,
 };
 
 // ============================================================================
-// Ollama Cloud Translation
+// Ollama Translation
 // ============================================================================
 
-async function translateWithOllama(
+async function translate(
   text: string,
   sourceLang: string,
   targetLang: string,
@@ -57,7 +53,7 @@ async function translateWithOllama(
 ): Promise<string> {
   const endpoint = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
 
-  const systemPrompt = `You are a professional, accurate ${targetLang} translator. Translate the following ${sourceLang} text to ${targetLang}. Only output the translation — no explanations, no comments, no quotes. Preserve the tone and nuance of the original. If the input is already in ${targetLang}, still translate it accurately to ${targetLang} as if it were ${sourceLang}.`;
+  const systemPrompt = `You are a professional, accurate ${targetLang} translator. Translate the following ${sourceLang} text to ${targetLang}. Only output the translation — no explanations, no quotes, no comments. Preserve the tone and nuance of the original.`;
 
   const response = await fetch(endpoint, {
     method: "POST",
@@ -77,10 +73,8 @@ async function translateWithOllama(
   });
 
   if (!response.ok) {
-    const errorText = await response.text().catch(() => "unknown error");
-    throw new Error(
-      `Ollama Cloud translation failed: ${response.status} ${response.statusText} — ${errorText}`,
-    );
+    const errorText = await response.text().catch(() => "unknown");
+    throw new Error(`Ollama translation failed: ${response.status} — ${errorText}`);
   }
 
   const data = (await response.json()) as {
@@ -89,27 +83,60 @@ async function translateWithOllama(
   };
 
   if (data.error) {
-    throw new Error(`Ollama Cloud API error: ${data.error.message}`);
+    throw new Error(`Ollama error: ${data.error.message}`);
   }
 
-  const translated =
-    data.choices?.[0]?.message?.content?.trim() ?? text;
-
-  return translated;
+  return data.choices?.[0]?.message?.content?.trim() ?? text;
 }
 
 // ============================================================================
-// Language Detection (simple heuristic)
+// Language Detection
 // ============================================================================
 
-/** Rough check if text is primarily Japanese (Hiragana/Katakana/Kanji) */
 function isJapanese(text: string): boolean {
-  // Count Japanese characters vs ASCII letters
   const japaneseChars = (
     text.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF]/g) || []
   ).length;
   const totalChars = text.replace(/\s/g, "").length;
   return totalChars > 0 && japaneseChars / totalChars > 0.3;
+}
+
+// ============================================================================
+// Prompt Parser — extract user message from full prompt string
+// ============================================================================
+
+/**
+ * The before_prompt_build prompt string looks roughly like:
+ * [system instructions]
+ * [history with role tags]
+ * USER: 日本語メッセージ
+ * ASSISTANT: ...
+ *
+ * We find the last "USER:" tagged block and check if it's Japanese.
+ */
+function extractLastUserMessage(prompt: string): { before: string; userContent: string; after: string } | null {
+  // Match the last occurrence of USER: prefix followed by content
+  // Pattern: starts with USER: or \nUSER: and captures everything up to the next role tag or end
+  const userPattern = /(?:^|\n)(USER):\s*([\s\S]*?)(?=\n(?:ASSISTANT|SYSTEM|USER|TOOL|RESULT|$))/gm;
+
+  const matches: Array<{ start: number; end: number; content: string }> = [];
+  let match;
+
+  while ((match = userPattern.exec(prompt)) !== null) {
+    matches.push({
+      start: match.index,
+      end: userPattern.lastIndex,
+      content: match[2].trim(),
+    });
+  }
+
+  if (matches.length === 0) return null;
+
+  const last = matches[matches.length - 1];
+  const before = prompt.slice(0, last.start);
+  const after = prompt.slice(last.end);
+
+  return { before, userContent: last.content, after };
 }
 
 // ============================================================================
@@ -129,48 +156,43 @@ export default function register(api: any) {
     `openclaw-translate-nemotron: enabled (model=${cfg.model}, ${cfg.sourceLang}→${cfg.targetLang})`,
   );
 
-  // Keep a reference to the original send fn so we can wrap response
-  const originalSend = api.sendMessage?.bind(api);
-
   // ========================================================================
-  // before_prompt_build — translate input J→E
+  // before_prompt_build — translate J→E input
   // ========================================================================
 
   api.on(
     "before_prompt_build",
-    async (event: {
-      prompt?: string;
-      messages?: Array<{ role?: string; content?: string }>;
-    }) => {
-      try {
-        // Find the last user message
-        const messages = event.messages || [];
-        const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+    async (event: { prompt?: string }) => {
+      const prompt = event.prompt;
+      if (!prompt) return;
 
-        if (!lastUserMsg?.content) return;
+      const extracted = extractLastUserMessage(prompt);
+      if (!extracted || !extracted.userContent) return;
 
-        const content = lastUserMsg.content as string;
-        if (!isJapanese(content)) {
-          // Not Japanese — optionally inject system prompt in English anyway
-          if (cfg.injectSystemPrompt) {
-            return {
-              appendSystemContext: [
-                "",
-                "## Language",
-                "You are conversing with the user in English. Respond in English only.",
-              ].join("\n"),
-            };
-          }
-          return;
+      const { before, userContent, after } = extracted;
+
+      if (!isJapanese(userContent)) {
+        // Not Japanese — just inject English system prompt
+        if (cfg.injectSystemPrompt) {
+          return {
+            appendSystemContext: [
+              "",
+              "## Language",
+              "You are speaking with the user in English. Respond in English only.",
+            ].join("\n"),
+          };
         }
+        return;
+      }
 
+      try {
         api.logger.info(
-          `openclaw-translate-nemotron: translating ${content.length} char J→E`,
+          `openclaw-translate-nemotron: translating ${userContent.length} char J→E`,
         );
 
         // Translate Japanese → English
-        const englishText = await translateWithOllama(
-          content,
+        const englishText = await translate(
+          userContent,
           cfg.sourceLang,
           cfg.targetLang,
           cfg.ollamaBaseUrl,
@@ -179,24 +201,30 @@ export default function register(api: any) {
           cfg.maxTokens,
         );
 
-        // Update the last user message with English translation
-        lastUserMsg.content = englishText;
+        // Reconstruct prompt with English user message
+        // Add role tag back
+        const roleTag = prompt.match(/\n(USER):\s*$/m)?.[1] || "USER";
+        const translatedPrompt =
+          before +
+          `${roleTag}: ${englishText}` +
+          after;
 
-        // Inject system prompt so LLM responds in English
-        const systemInject = cfg.injectSystemPrompt
-          ? [
-              "",
-              "## Language",
-              "The user's message has been translated from Japanese to English. Respond in English only. The user prefers English responses.",
-            ].join("\n")
-          : "";
+        api.logger.info(
+          `openclaw-translate-nemotron: translated to "${englishText.slice(0, 50)}..."`,
+        );
 
         return {
-          appendSystemContext: systemInject,
+          prompt: translatedPrompt,
+          appendSystemContext: cfg.injectSystemPrompt
+            ? [
+                "",
+                "## Language",
+                "The user's message has been translated from Japanese to English. Respond in English only.",
+              ].join("\n")
+            : "",
         };
       } catch (err) {
-        api.logger.error(`openclaw-translate-nemotron: translation error — ${err}`);
-        // Don't block the flow on translation failure
+        api.logger.error(`openclaw-translate-nemotron: J→E translation error — ${err}`);
         return;
       }
     },
@@ -204,22 +232,22 @@ export default function register(api: any) {
   );
 
   // ========================================================================
-  // after_agent_run — translate output E→J
+  // after_agent_run — translate E→J output
   // ========================================================================
 
   if (api.on) {
     api.on(
       "after_agent_run",
-      async (event: { response?: string; messages?: Array<{ role?: string; content?: string }> }) => {
-        try {
-          const response = event.response || "";
-          if (!response || !isJapanese(response)) return;
+      async (event: { response?: string }) => {
+        const response = event.response;
+        if (!response || !isJapanese(response)) return;
 
+        try {
           api.logger.info(
             `openclaw-translate-nemotron: translating ${response.length} char E→J`,
           );
 
-          const japaneseText = await translateWithOllama(
+          const japaneseText = await translate(
             response,
             cfg.targetLang,
             cfg.sourceLang,
@@ -229,20 +257,13 @@ export default function register(api: any) {
             cfg.maxTokens,
           );
 
-          // Update the response
           event.response = japaneseText;
 
-          // Also find and update the last assistant message in messages
-          if (event.messages) {
-            const lastAssistant = [...event.messages].reverse().find(
-              (m) => m.role === "assistant",
-            );
-            if (lastAssistant?.content) {
-              lastAssistant.content = japaneseText;
-            }
-          }
+          api.logger.info(
+            `openclaw-translate-nemotron: E→J done → "${japaneseText.slice(0, 30)}..."`,
+          );
         } catch (err) {
-          api.logger.error(`openclaw-translate-nemotron: response translation error — ${err}`);
+          api.logger.error(`openclaw-translate-nemotron: E→J translation error — ${err}`);
         }
       },
       { priority: 30 },
