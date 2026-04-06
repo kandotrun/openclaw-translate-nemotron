@@ -1,0 +1,81 @@
+{
+  "id": "openclaw-translate-nemotron",
+  "name": "OpenClaw Translate — Nemotron",
+  "description": "Translates Japanese messages to English before LLM processing, then translates English responses back to Japanese. Uses Nemotron via Ollama Cloud for translation. Enable this plugin to practice English while receiving Japanese responses.",
+  "kind": "legacy-hook",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable translation middleware"
+      },
+      "ollamaBaseUrl": {
+        "type": "string",
+        "default": "https://ollama.com/v1",
+        "description": "Ollama Cloud base URL"
+      },
+      "apiKey": {
+        "type": "string",
+        "default": "ollama-local",
+        "description": "API key for Ollama Cloud"
+      },
+      "sourceLang": {
+        "type": "string",
+        "default": "Japanese",
+        "description": "Source language to translate from"
+      },
+      "targetLang": {
+        "type": "string",
+        "default": "English",
+        "description": "Target language to translate to"
+      },
+      "model": {
+        "type": "string",
+        "default": "nemotron-3-super:120b-cloud",
+        "description": "Ollama Cloud model for translation"
+      },
+      "maxTokens": {
+        "type": "number",
+        "default": 1024,
+        "description": "Max translation tokens per request"
+      },
+      "injectSystemPrompt": {
+        "type": "boolean",
+        "default": true,
+        "description": "Inject English system prompt after translation so LLM responds in English"
+      }
+    }
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Enabled",
+      "help": "Enable automatic J→E→J translation via Nemotron on Ollama Cloud"
+    },
+    "model": {
+      "label": "Translation Model",
+      "help": "Ollama Cloud model to use. Default: nemotron-3-super:120b-cloud"
+    },
+    "ollamaBaseUrl": {
+      "label": "Ollama Cloud URL",
+      "help": "Ollama Cloud API base URL",
+      "advanced": true
+    },
+    "apiKey": {
+      "label": "API Key",
+      "help": "Ollama Cloud API key",
+      "advanced": true
+    },
+    "maxTokens": {
+      "label": "Max Tokens",
+      "help": "Maximum tokens per translation request",
+      "advanced": true
+    },
+    "injectSystemPrompt": {
+      "label": "Inject English System Prompt",
+      "help": "After translating input to English, inject a system prompt so the LLM responds in English"
+    }
+  }
+}
